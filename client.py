@@ -2,7 +2,6 @@ import socket
 import json
 import sqlite3
 import threading
-import uuid
 from datetime import datetime
 
 
@@ -13,9 +12,8 @@ class Client:
         self.username = username
         self.client_ip = self.get_local_ip()
         self.client_port = client_port
-        self.conn = sqlite3.connect('p2p_messaging_app.db')
-        self.cursor = self.conn.cursor()
         self.stop_listening = False
+        self.db_file = f'p2p_messaging_app_{username}.db'
 
     def get_local_ip(self):
         """Get the local IP address of the client."""
@@ -37,10 +35,10 @@ class Client:
             print(f"Listening for messages on {self.client_ip}:{self.client_port}")
             while not self.stop_listening:
                 conn, addr = s.accept()
-                threading.Thread(target=self.handle_incoming_message, args=(conn,)).start()
+                threading.Thread(target=self.handle_incoming_message, args=(conn, addr)).start()
 
     def handle_incoming_message(self, conn, addr):
-        """Handles an incoming message from another client and possibly stores sender as a new contact."""
+        """Handles an incoming message, stores sender as a new contact if not blocked."""
         with conn:
             while True:
                 data = conn.recv(1024)
@@ -50,55 +48,81 @@ class Client:
                     message_info = json.loads(data.decode('utf-8'))
                     sender_username = message_info.get('sender_username')
                     message_text = message_info.get('message_text')
-                    print(f"Message from {sender_username}: {message_text}")
 
-                    # Add sender to contacts if new
-                    self.add_contact_if_new(sender_username)
+                    if self.is_contact_blocked(sender_username):
+                        continue
+
+                    print(f"{sender_username}: {message_text}")
+
+                    db_conn = sqlite3.connect(self.db_file)
+                    cursor = db_conn.cursor()
+                    if not self.is_contact(sender_username, cursor):
+                        print(f"Do you want to accept messages from {sender_username}? [y/n]: ")
+                        user_decision = input()
+
+                        if user_decision == 'y':
+                            blocked = 0
+                        elif user_decision == 'n':
+                            blocked = 1
+                            print(f"{sender_username} has been blocked.")
+
+                        try:
+                            cursor.execute("INSERT INTO Contacts (Username, Blocked) VALUES (?, ?)",
+                                           (sender_username, blocked))
+                            db_conn.commit()
+                            if blocked == 0:
+                                print(f"Added {sender_username} to contacts.")
+                            else:
+                                continue
+                        except sqlite3.IntegrityError as e:
+                            print(f"Could not add {sender_username} to contacts: {e}")
 
                     self.store_received_message(sender_username, self.username, message_text)
                 except json.JSONDecodeError as e:
                     print(f"Failed to decode message: {e}")
                     continue
 
-    def add_contact_if_new(self, username):
-        """Adds a new contact if they're not already in the Contacts table."""
-        if not self.is_contact(username):
-            try:
-                self.cursor.execute("INSERT INTO Contacts (Username) VALUES (?)", (username,))
-                self.conn.commit()
-                print(f"Added {username} to contacts.")
-            except sqlite3.IntegrityError as e:
-                print(f"Could not add {username} to contacts: {e}")
+    def is_contact_blocked(self, username):
+        """Check if the username is blocked."""
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute("SELECT Blocked FROM Contacts WHERE Username = ?", (username,))
+        result = cursor.fetchone()
+        return result and result[0] == 1
 
-    def is_contact(self, username):
+    def is_contact(self, username, cursor):
         """Check if the username is already a contact."""
-        self.cursor.execute("SELECT Username FROM Contacts WHERE Username = ?", (username,))
-        return self.cursor.fetchone() is not None
+        cursor.execute("SELECT Username FROM Contacts WHERE Username = ?", (username,))
+        return cursor.fetchone() is not None
 
     def store_received_message(self, sender_username, receiver_username, message_text):
         """Stores a received message in the database."""
-        message_id = str(uuid.uuid4())
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         delivered = 1  # Assuming the message is considered delivered upon receipt
 
-        self.cursor.execute('''
-        INSERT INTO Messages (MessageID, SenderUsername, ReceiverUsername, MessageText, Delivered, Timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ''', (message_id, sender_username, receiver_username, message_text, delivered, timestamp))
-        self.conn.commit()
-        print("Received message stored in the database.")
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO Messages (SenderUsername, ReceiverUsername, MessageText, Delivered, Timestamp)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (sender_username, receiver_username, message_text, delivered, timestamp))
+        conn.commit()
 
     def send_message(self, receiver_username, ip, port, message):
         """Sends a message to another client. Stores the message if the recipient is offline."""
         try:
+            # Format the message and sender information as a JSON string
+            message_data = json.dumps({
+                'sender_username': self.username,
+                'message_text': message
+            }).encode('utf-8')
+
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(5)  # Timeout to avoid hanging indefinitely
                 s.connect((ip, port))
-                s.sendall(message.encode('utf-8'))
-                self.store_sent_message(receiver_username, message)
+                s.sendall(message_data)
         except Exception as e:
             print(e)
-
     def register_in_server(self):
         """Register this client with the central server."""
         data = json.dumps({
@@ -127,9 +151,19 @@ class Client:
                 return json.loads(response)
 
     def start_chat_session(self):
-        receiver_username = input("Enter the username of the user you want to chat with: ")
+        receiver_username = input("Enter the username of the user you want to chat with: \n")
         if receiver_username == "exit":
             return run()
+        db_conn = sqlite3.connect(self.db_file)
+        cursor = db_conn.cursor()
+        try:
+            cursor.execute("INSERT INTO Contacts (Username, Blocked) VALUES (?, ?)",
+                           (receiver_username, 0))
+            db_conn.commit()
+            print(f"Added {receiver_username} to contacts.")
+        except sqlite3.IntegrityError as e:
+            print(f"Could not add {receiver_username} to contacts: {e}")
+        # Check if receiver is online
         user_info = self.lookup_user(receiver_username)
         print(f"Starting chat with {receiver_username}...")
         while True:
@@ -144,21 +178,24 @@ class Client:
                 self.store_sent_message(receiver_username, message, delivered=0)
 
     def store_sent_message(self, receiver_username, message, delivered=1):
-        """Stores an undelivered message in the database."""
-        message_id = str(uuid.uuid4())
-        self.cursor.execute('''
-        INSERT INTO Messages (MessageID, SenderUsername, ReceiverUsername, MessageText, Delivered, Timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)
+        """Stores a message in the database. Delivered=0 is message pending to be sent."""
+        conn = sqlite3.connect('p2p_messaging_app.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO Messages (SenderUsername, ReceiverUsername, MessageText, Delivered, Timestamp)
+        VALUES (?, ?, ?, ?, ?)
         ''', (
-        message_id, self.username, receiver_username, message, delivered, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        self.conn.commit()
+            self.username, receiver_username, message, delivered, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
 
     def send_undelivered_messages(self):
         """Attempts to send any messages stored as undelivered."""
-        self.cursor.execute('''
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute('''
         SELECT MessageID, ReceiverUsername, MessageText FROM Messages WHERE Delivered = 0 AND SenderUsername = ?
         ''', (self.username,))
-        undelivered_messages = self.cursor.fetchall()
+        undelivered_messages = cursor.fetchall()
 
         for message_id, receiver_username, message_text in undelivered_messages:
             # Lookup the receiver's current IP and port
@@ -172,10 +209,10 @@ class Client:
                         s.sendall(message_text.encode('utf-8'))
 
                     # If successful, mark the message as delivered
-                    self.cursor.execute('''
+                    cursor.execute('''
                     UPDATE Messages SET Delivered = 1 WHERE MessageID = ?
                     ''', (message_id,))
-                    self.conn.commit()
+                    conn.commit()
                     print(f"Undelivered message to {receiver_username} sent successfully.")
                 except Exception as e:
                     print(f"Failed to send undelivered message to {receiver_username}: {e}")
@@ -185,7 +222,7 @@ def run():
     server_ip = '127.0.0.1'  # Running locally
     server_port = 12345
     client_port = int(input("Introduce your port number: "))
-    username = input("Introduce your username: ")
+    username = str(input("Introduce your username: "))
     client = Client(server_ip, server_port, username, client_port)
     client.register_in_server()
 
