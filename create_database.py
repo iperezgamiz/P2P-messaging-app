@@ -1,7 +1,9 @@
 import sqlite3
 
+username = input("Introduce username: ")
+
 # Create SQLite database
-conn = sqlite3.connect('p2p_messaging_app.db')
+conn = sqlite3.connect(f'p2p_messaging_app_{username}.db')
 
 # Create a cursor object using the cursor() method
 cursor = conn.cursor()
@@ -10,6 +12,7 @@ cursor = conn.cursor()
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS Contacts (
     Username TEXT NOT NULL UNIQUE,
+    Blocked INTEGER DEFAULT 0
 );
 ''')
 
@@ -21,9 +24,7 @@ CREATE TABLE IF NOT EXISTS Messages (
     ReceiverUsername INTEGER,
     MessageText TEXT NOT NULL,
     Delivered INTEGER NOT NULL,
-    Timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (SenderUsername) REFERENCES Users(UserID),
-    FOREIGN KEY (ReceiverUsername) REFERENCES Users(UserID)
+    Timestamp DATETIME NOT NULL
 );
 ''')
 
