@@ -11,8 +11,7 @@ cursor = conn.cursor()
 # Create 'Contacts' table
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS Contacts (
-    Username TEXT NOT NULL UNIQUE,
-    Blocked INTEGER DEFAULT 0
+    Username TEXT NOT NULL UNIQUE
 );
 ''')
 
